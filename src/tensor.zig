@@ -14,25 +14,75 @@ pub fn Tensor(comptime T: type) type {
         data: []T,
         allocator: Allocator,
 
-        /// Initialize a Tensor with a given shape
+        /// Initialize a Tensor
         fn init(allocator: Allocator, shape: []usize) !Tensor(T) {
             // Calculate the size from the shape of the Tensor
-            var size = 1;
+            var size: usize = 1;
             for (shape) |dim| size *= dim;
-            // Find the stride of Tensor
-            const stride = stride_from_shape(shape, allocator);
-            // Allocate the data
+            // Find the stride
+            const stride = try stride_from_shape(shape, allocator);
+            // Allocate the data for the Tensor
             const data = try allocator.alloc(T, size);
+            // // Allocate the data
+            // const data = try allocator.alloc(T, 0);
+            // // Allocate the stride
+            // const stride = ArrayList(usize).init(allocator);
             return .{
                 .size = size,
                 .offset = 0,
                 .stride = stride,
                 .data = data,
+                .allocator = allocator,
             };
+        }
+
+        /// Fill a Tensor with a particular value
+        fn fill(self: *Tensor(T), val: T) void {
+            for (self.*.data, 0..) |_, idx| {
+                self.*.data[idx] = val;
+            }
+        }
+
+        /// Get a value from a position in the tensor
+        fn at(self: *Tensor(T), index: []usize) TensorError!T {
+            // Check that the input index is valid
+            if (index.len != self.*.stride.items.len) {
+                return TensorError.InvalidIndex;
+            }
+            // Calculate the position of the desired entry in items
+            var position: usize = 0;
+            for (0..index.len) |i| {
+                position += index[i] * self.*.stride.items[i];
+            }
+            // Bounds check
+            if (position >= self.*.size) {
+                return TensorError.InvalidIndex;
+            }
+            // Return the desired item
+            return self.*.data[position];
+        }
+
+        /// Deinitialize a Tensor
+        fn deinit(self: *Tensor(T)) void {
+            // Free the underlying items
+            self.*.allocator.free(self.*.data);
+            // Deinit the stride
+            self.*.stride.deinit();
+            // Invalidate the reference
+            self.* = undefined;
         }
     };
 }
 
+/// Tensor Errors
+const TensorError = error{
+    /// Attempted to access a position with a
+    /// invalid index (wrong index dimension,
+    /// or out of bounds)
+    InvalidIndex,
+};
+
+// Helper Functions
 fn stride_from_shape(shape: []usize, allocator: Allocator) !ArrayList(usize) {
     var stride = ArrayList(usize).init(allocator);
     if (shape.len == 0) {
@@ -117,4 +167,25 @@ test "Getting stride from shape (3D)" {
     try expected_stride.appendSlice(&expected_stride_array);
 
     try testing.expect(std.mem.eql(usize, expected_stride.items, test_stride.items));
+}
+
+test "Creating a Tensor (1D)" {
+    var test_shape = [_]usize{5};
+    var test_tensor = try Tensor(i32).init(testing.allocator, &test_shape);
+    defer test_tensor.deinit();
+}
+
+test "Filling a Tensor" {
+    var test_shape = [_]usize{ 5, 4 };
+    var test_tensor = try Tensor(i32).init(testing.allocator, &test_shape);
+    defer test_tensor.deinit();
+    // Fill the tensor with 0s
+    test_tensor.fill(0);
+    // For each row/col check that the value is 0
+    for (0..5) |row| {
+        for (0..4) |col| {
+            var index = [_]usize{ row, col };
+            try testing.expectEqual(test_tensor.at(&index), 0);
+        }
+    }
 }
