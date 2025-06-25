@@ -14,7 +14,7 @@ pub fn Tensor(comptime T: type) type {
         data: []T,
         allocator: Allocator,
 
-        /// Initialize a Tensor
+        /// Initialize a Tensor with a given shape
         fn init(allocator: Allocator, shape: []usize) !Tensor(T) {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
