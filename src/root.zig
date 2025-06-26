@@ -1,22 +1,10 @@
-//! By convention, root.zig is the root source file when making a library.
+//! Zig-tensor is a small library for creating and working
+//! with multidimentional containers commonly called tensors.
+//! It's goal is similar to numpy in python, xtensor in c++,
+//! or ndarray in rust, but it will remain small and simple, and
+//! mostly be useful for learning about how multidimensional arrays
+//! are handled.
 const std = @import("std");
-
-pub fn advancedPrint() !void {
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // Don't forget to flush!
-}
-
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
 
 pub const tensor = @import("tensor.zig");
 

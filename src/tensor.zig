@@ -11,6 +11,8 @@ pub fn Tensor(comptime T: type) type {
         size: usize,
         offset: usize,
         stride: ArrayList(usize),
+        dim: usize,
+        dimsize: ArrayList(usize),
         data: []T,
         allocator: Allocator,
 
@@ -19,8 +21,13 @@ pub fn Tensor(comptime T: type) type {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
             for (shape) |dim| size *= dim;
+            // Get the number of dimensions
+            const dim = shape.len;
             // Find the stride
             const stride = try stride_from_shape(shape, allocator);
+            // Create the dimsize arraylist
+            var dimsize = ArrayList(usize).init(allocator);
+            try dimsize.appendSlice(shape);
             // Allocate the data for the Tensor
             const data = try allocator.alloc(T, size);
             // // Allocate the data
@@ -31,6 +38,8 @@ pub fn Tensor(comptime T: type) type {
                 .size = size,
                 .offset = 0,
                 .stride = stride,
+                .dim = dim,
+                .dimsize = dimsize,
                 .data = data,
                 .allocator = allocator,
             };
@@ -50,7 +59,7 @@ pub fn Tensor(comptime T: type) type {
                 return TensorError.InvalidIndex;
             }
             // Calculate the position of the desired entry in items
-            var position: usize = 0;
+            var position: usize = self.*.offset;
             for (0..index.len) |i| {
                 position += index[i] * self.*.stride.items[i];
             }
@@ -68,6 +77,8 @@ pub fn Tensor(comptime T: type) type {
             self.*.allocator.free(self.*.data);
             // Deinit the stride
             self.*.stride.deinit();
+            // Deinit the dimsize
+            self.*.dimsize.deinit();
             // Invalidate the reference
             self.* = undefined;
         }
