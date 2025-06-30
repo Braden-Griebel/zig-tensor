@@ -61,7 +61,7 @@ pub fn Tensor(comptime T: type) type {
                 position += @as(isize, @intCast(index[i])) * self.stride.items[i];
             }
             // Bounds check
-            if (position >= self.size) {
+            if (position >= self.data.unwrap().len) {
                 return TensorError.InvalidIndex;
             }
             // Return the desired item
@@ -80,7 +80,7 @@ pub fn Tensor(comptime T: type) type {
                 position += @as(isize, @intCast(index[i])) * self.stride.items[i];
             }
             // Bounds check
-            if (position >= self.size or position < 0) {
+            if (position >= self.data.unwrap().len or position < 0) {
                 return TensorError.InvalidIndex;
             }
             // Set the value
@@ -88,11 +88,53 @@ pub fn Tensor(comptime T: type) type {
         }
 
         /// Get a slice from the Tensor
+        ///
+        /// Note that this Tensor will reference the same data as the parent tensor,
+        /// and will have the same dimensionality regardless of the slices
         pub fn slice(self: *Tensor(T), indices: []TensorSlice) TensorError!Tensor(T) {
             if (indices.len != self.dim) {
                 return TensorError.IncorrectDimensions; // Too many slices
             }
-            @panic("todo");
+            // The new size will be the product of stop-start/step for each dimension
+            var new_size: usize = 1;
+            // The new offset will be the old offset + stride*start for each slice
+            var new_offset: usize = self.offset;
+            // The new strides will be old_stride * step for each dimension
+            var new_stride: ArrayList(isize) = ArrayList(isize).initCapacity(
+                self.allocator,
+                self.dim,
+            );
+            // The new dimensionality (same as previous dimensionality)
+            const new_dim = self.dim;
+            // The new shape will be the stop-start/step for each dimension
+            var new_shape = ArrayList(usize).initCapacity(self.allocator, self.dim);
+            // Get a new data reference
+            const new_data = self.data.clone();
+            // The allocator will be the same
+            const new_allocator = self.allocator;
+
+            // Iterate through the slices to update the values
+            for (indices, 0..) |s, idx| {
+                const dim_size = @divFloor((s.stop - s.start), s.step);
+                // Update the size
+                new_size *= dim_size;
+                // Update the shape
+                new_shape.items[idx] = dim_size;
+                // Update the stride
+                new_stride.items[idx] = s.step * self.stride.items[idx];
+                // Update the offset
+                new_offset += self.stride.items[idx] * s.start;
+            }
+            // Return the newly created tensor
+            return .{
+                .size = new_size,
+                .offset = new_offset,
+                .stride = new_stride,
+                .dim = new_dim,
+                .shape = new_shape,
+                .data = new_data,
+                .allocator = new_allocator,
+            };
         }
 
         /// Deinitialize a Tensor
