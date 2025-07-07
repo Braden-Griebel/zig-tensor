@@ -74,6 +74,7 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
+        /// Initialize a Tensor with a given shape, with data from a slice
         pub fn initWithSlice(allocator: Allocator, shape: []usize, in_data: []T) !Tensor(T) {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
@@ -99,6 +100,18 @@ pub fn Tensor(comptime T: type) type {
                 .data = data,
                 .allocator = allocator,
             };
+        }
+
+        /// Free memory associated with a Tensor
+        fn deinit(self: *Tensor(T)) void {
+            // Free the underlying items
+            self.data.deinit();
+            // Deinit the stride
+            self.stride.deinit();
+            // Deinit the dimsize
+            self.shape.deinit();
+            // Invalidate the reference
+            self.* = undefined;
         }
 
         /// Fill a Tensor with a particular value
@@ -277,18 +290,6 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
-        /// Deinitialize a Tensor
-        fn deinit(self: *Tensor(T)) void {
-            // Free the underlying items
-            self.data.deinit();
-            // Deinit the stride
-            self.stride.deinit();
-            // Deinit the dimsize
-            self.shape.deinit();
-            // Invalidate the reference
-            self.* = undefined;
-        }
-
         /// Get an iterator over the Tensor's indices
         pub fn getIndexIter(self: *Tensor(T)) !TensorIndexIter(T) {
             return try TensorIndexIter(T).init(self);
@@ -325,7 +326,7 @@ pub fn TensorIndexIter(comptime T: type) type {
                 .tensor_shape = tensor.shape.items,
                 .tensor_offset = tensor.offset,
                 .current_tensor_index = current_tensor_index,
-                .current_data_index = 0,
+                .current_data_index = tensor.offset,
             };
         }
 
@@ -662,4 +663,33 @@ test "Cloning a Tensor" {
     try testing.expectEqual(100, try test_tensor.at(&test_index));
     // but not in the clone
     try testing.expectEqual(3, try test_tensor_clone.at(&test_index));
+}
+
+test "Cloning a Sliced Tensor" {
+    var test_shape = [_]usize{ 3, 2 };
+    var test_tensor_data_array = [_]i32{ 0, 1, 2, 3, 4, 5 };
+    var test_tensor = try Tensor(i32).initWithSlice(testing.allocator, &test_shape, &test_tensor_data_array);
+    defer test_tensor.deinit();
+
+    // Slice the tensor
+    var test_slices = [_]TensorSlice{ .{ .start = 1 }, .{} };
+    var test_tensor_sliced = try test_tensor.slice(&test_slices);
+    defer test_tensor_sliced.deinit();
+
+    // Clone the sliced tensor
+    var test_tensor_cloned = try test_tensor_sliced.clone();
+    defer test_tensor_cloned.deinit();
+
+    // Check the expected values
+    var idx1 = [_]usize{ 0, 0 };
+    try testing.expectEqual(2, test_tensor_cloned.at(&idx1));
+
+    var idx2 = [_]usize{ 0, 1 };
+    try testing.expectEqual(3, test_tensor_cloned.at(&idx2));
+
+    var idx3 = [_]usize{ 1, 0 };
+    try testing.expectEqual(4, test_tensor_cloned.at(&idx3));
+
+    var idx4 = [_]usize{ 1, 1 };
+    try testing.expectEqual(5, test_tensor_cloned.at(&idx4));
 }
