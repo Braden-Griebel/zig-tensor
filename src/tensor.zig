@@ -150,21 +150,23 @@ pub fn Tensor(comptime T: type) type {
         /// and will have the same dimensionality regardless of the slices
         pub fn slice(self: *Tensor(T), indices: []TensorSlice) TensorError!Tensor(T) {
             if (indices.len != self.dim) {
-                return TensorError.IncorrectDimensions; // Too many slices
+                return TensorError.InvalidDimensions; // Too many slices
             }
             // The new size will be the product of stop-start/step for each dimension
             var new_size: usize = 1;
             // The new offset will be the old offset + stride*start for each slice
             var new_offset: usize = self.offset;
             // The new strides will be old_stride * step for each dimension
-            var new_stride: ArrayList(isize) = ArrayList(isize).initCapacity(
+            var new_stride: ArrayList(isize) = try ArrayList(isize).initCapacity(
                 self.allocator,
                 self.dim,
             );
+            try new_stride.resize(self.dim);
             // The new dimensionality (same as previous dimensionality)
             const new_dim = self.dim;
             // The new shape will be the stop-start/step for each dimension
-            var new_shape = ArrayList(usize).initCapacity(self.allocator, self.dim);
+            var new_shape = try ArrayList(usize).initCapacity(self.allocator, self.dim);
+            try new_shape.resize(self.dim);
             // Get a new data reference
             const new_data = self.data.clone();
             // The allocator will be the same
@@ -172,15 +174,18 @@ pub fn Tensor(comptime T: type) type {
 
             // Iterate through the slices to update the values
             for (indices, 0..) |s, idx| {
-                const dim_size = @divFloor((s.stop - s.start), s.step);
+                const slice_start = s.start orelse 0;
+                const slice_step = s.step orelse 1;
+                const slice_stop = s.stop orelse @as(isize, @intCast(self.shape.items[idx]));
+                const dim_size = @as(usize, @intCast(@divFloor((slice_stop - slice_start), slice_step)));
                 // Update the size
                 new_size *= dim_size;
                 // Update the shape
                 new_shape.items[idx] = dim_size;
                 // Update the stride
-                new_stride.items[idx] = s.step * self.stride.items[idx];
+                new_stride.items[idx] = slice_step * self.stride.items[idx];
                 // Update the offset
-                new_offset += self.stride.items[idx] * s.start;
+                new_offset += @as(usize, @intCast(self.stride.items[idx] * slice_start));
             }
             // Return the newly created tensor
             return .{
@@ -232,6 +237,46 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
+        /// Create (and return) a deep copy of the Tensor,
+        /// with new memory (which will be laid out in row major
+        /// order regardless of the data arrangement of the
+        /// Tensor being cloned)
+        pub fn clone(self: *Tensor(T)) !Tensor(T) {
+            // Start by creating a new TensorData structure with the needed memory
+            var new_tensor_data = try TensorData(T).initWithSize(self.allocator, self.size);
+            var data_items: []T = new_tensor_data.unwrap();
+
+            // Copy data from self into the new tensor data
+            // NOTE: A memcpy won't work, as the arragement may need to change
+            // TODO: Determine cases where a simple memcpy will perform as expected
+            var old_tensor_iter = try self.getIndexIter();
+            defer old_tensor_iter.deinit();
+
+            for (0..self.size) |idx| {
+                // Copy over the data
+                data_items[idx] = self.data.unwrap()[old_tensor_iter.current_data_index];
+                // Increment the old tensor iterator, and if that can no longer iterate,
+                // break the loop
+                if (!old_tensor_iter.increment()) {
+                    std.debug.assert(idx == self.size - 1);
+                    break;
+                }
+            }
+
+            // Get the stride of the new tensor
+            const new_tensor_stride = try stride_from_shape(self.shape.items, self.allocator);
+
+            return Tensor(T){
+                .size = self.size,
+                .offset = 0,
+                .stride = new_tensor_stride,
+                .dim = self.dim,
+                .shape = try self.shape.clone(),
+                .data = new_tensor_data,
+                .allocator = self.allocator,
+            };
+        }
+
         /// Deinitialize a Tensor
         fn deinit(self: *Tensor(T)) void {
             // Free the underlying items
@@ -242,6 +287,11 @@ pub fn Tensor(comptime T: type) type {
             self.shape.deinit();
             // Invalidate the reference
             self.* = undefined;
+        }
+
+        /// Get an iterator over the Tensor's indices
+        pub fn getIndexIter(self: *Tensor(T)) !TensorIndexIter(T) {
+            return try TensorIndexIter(T).init(self);
         }
     };
 }
@@ -267,11 +317,12 @@ pub fn TensorIndexIter(comptime T: type) type {
         /// data in the Tensor
         fn init(tensor: *Tensor(T)) !TensorIndexIter(T) {
             const current_tensor_index = try tensor.allocator.alloc(usize, tensor.dim);
+            @memset(current_tensor_index, 0);
 
             return .{
                 .allocator = tensor.allocator,
-                .tensor_strides = tensor.strides,
-                .tensor_shape = tensor.shape,
+                .tensor_strides = tensor.stride.items,
+                .tensor_shape = tensor.shape.items,
                 .tensor_offset = tensor.offset,
                 .current_tensor_index = current_tensor_index,
                 .current_data_index = 0,
@@ -293,9 +344,10 @@ pub fn TensorIndexIter(comptime T: type) type {
             // Whether to carry to the next index
             var carry: bool = true;
             // Current index in the tensor index
-            var index_index: isize = self.tensor_strides.len - 1;
+            var index_index: usize = self.tensor_strides.len;
             // While we need to find something to increment, step through
-            while (carry and index_index >= 0) : (index_index -= 1) {
+            while (carry and index_index > 0) {
+                index_index -= 1;
                 carry = false;
                 // Check if the current index can be incremented without carrying
                 if (self.current_tensor_index[index_index] < self.tensor_shape[index_index] - 1) {
@@ -339,6 +391,8 @@ const TensorError = error{
     InvalidDimensions,
     /// Attempted to reshape a Tensor with an invalid shape
     InvalidShape,
+    /// If an allocation fails
+    OutOfMemory,
 };
 
 /// The internal data array of a Tensor, essentially
@@ -414,9 +468,9 @@ fn TensorData(comptime T: type) type {
 }
 
 const TensorSlice = struct {
-    start: isize,
-    stop: isize,
-    step: isize,
+    start: ?isize = null,
+    stop: ?isize = null,
+    step: ?isize = null,
 };
 
 // Helper Functions
@@ -515,6 +569,25 @@ test "Creating a Tensor (1D)" {
     defer test_tensor.deinit();
 }
 
+test "Creating a Tensor from a Slice" {
+    var shape_array = [_]usize{ 3, 2 };
+    var test_array = [_]i32{
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+    };
+    var test_tensor = try Tensor(i32).initWithSlice(testing.allocator, &shape_array, &test_array);
+    defer test_tensor.deinit();
+
+    for (0..6) |idx| {
+        var tensor_index = [_]usize{ @divFloor(idx, 2), idx % 2 };
+        try testing.expectEqual(@as(i32, @intCast(idx)), test_tensor.at(&tensor_index));
+    }
+}
+
 test "Filling a Tensor" {
     var test_shape = [_]usize{ 5, 4 };
     var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
@@ -543,4 +616,50 @@ test "Setting a Value" {
 
     // Check that the index was indeed updated
     try testing.expectEqual(5, test_tensor.at(&idx));
+}
+
+test "Slicing a Tensor" {
+    var test_shape = [_]usize{ 3, 3 };
+    var test_tensor_data = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    var test_tensor = try Tensor(i32).initWithSlice(testing.allocator, &test_shape, &test_tensor_data);
+    defer test_tensor.deinit();
+
+    var test_slices = [_]TensorSlice{ .{ .start = 1 }, .{ .start = 1 } };
+    var test_sliced_tensor = try test_tensor.slice(&test_slices);
+    defer test_sliced_tensor.deinit();
+
+    var idx1 = [_]usize{ 0, 0 };
+    try testing.expectEqual(4, try test_sliced_tensor.at(&idx1));
+
+    var idx2 = [_]usize{ 0, 1 };
+    try testing.expectEqual(5, try test_sliced_tensor.at(&idx2));
+
+    var idx3 = [_]usize{ 1, 0 };
+    try testing.expectEqual(7, try test_sliced_tensor.at(&idx3));
+
+    var idx4 = [_]usize{ 1, 1 };
+    try testing.expectEqual(8, try test_sliced_tensor.at(&idx4));
+}
+
+test "Cloning a Tensor" {
+    var test_shape = [_]usize{ 3, 2 };
+    var test_tensor_data_array = [_]i32{ 0, 1, 2, 3, 4, 5 };
+    var test_tensor = try Tensor(i32).initWithSlice(testing.allocator, &test_shape, &test_tensor_data_array);
+    defer test_tensor.deinit();
+
+    // Clone the tensor
+    var test_tensor_clone = try test_tensor.clone();
+    defer test_tensor_clone.deinit();
+
+    // Check that the data arrays are the same (no slicing so this should work)
+    try testing.expectEqualSlices(i32, test_tensor.data.unwrap(), test_tensor_clone.data.unwrap());
+
+    // Now set a value on the original, and make sure it doesn't modify the cloned tensor
+    var test_index = [_]usize{ 1, 1 };
+    try test_tensor.set(&test_index, 100);
+
+    // Enure that the entry is changed in the original...
+    try testing.expectEqual(100, try test_tensor.at(&test_index));
+    // but not in the clone
+    try testing.expectEqual(3, try test_tensor_clone.at(&test_index));
 }
