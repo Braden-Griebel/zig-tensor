@@ -17,7 +17,7 @@ pub fn Tensor(comptime T: type) type {
         allocator: Allocator,
 
         /// Initialize a Tensor with a given shape
-        fn init(allocator: Allocator, shape: []usize) !Tensor(T) {
+        pub fn initWithShape(allocator: Allocator, shape: []usize) !Tensor(T) {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
             for (shape) |dim| size *= dim;
@@ -44,13 +44,70 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
+        /// Initialize a Tensor with a given shape, and filled with a value
+        pub fn initFilled(allocator: Allocator, shape: []usize, fill_val: T) !Tensor(T) {
+            // Calculate the size from the shape of the Tensor
+            var size: usize = 1;
+            for (shape) |dim| size *= dim;
+            // Get the number of dimensions
+            const dim = shape.len;
+            // Find the stride
+            const stride = try stride_from_shape(shape, allocator);
+            // Create the shape arraylist
+            var tensor_shape = ArrayList(usize).init(allocator);
+            try tensor_shape.appendSlice(shape);
+            // Allocate the data for the Tensor
+            var tensor_data = try TensorData(T).initWithSize(allocator, size);
+            defer tensor_data.deinit(); // Remove the reference from within this funciton
+            // Fill the Tensor data with the specified value
+            tensor_data.fill(fill_val);
+            const data = tensor_data.clone();
+            // Create and return the Tensor
+            return Tensor(T){
+                .size = size,
+                .offset = 0,
+                .stride = stride,
+                .dim = dim,
+                .shape = tensor_shape,
+                .data = data,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn initWithSlice(allocator: Allocator, shape: []usize, in_data: []T) !Tensor(T) {
+            // Calculate the size from the shape of the Tensor
+            var size: usize = 1;
+            for (shape) |dim| size *= dim;
+            // Get the number of dimensions
+            const dim = shape.len;
+            // Find the stride
+            const stride = try stride_from_shape(shape, allocator);
+            // Create the shape arraylist
+            var tensor_shape = ArrayList(usize).init(allocator);
+            try tensor_shape.appendSlice(shape);
+            // Allocate the data for the Tensor
+            var tensor_data = try TensorData(T).initWithSlice(allocator, in_data);
+            defer tensor_data.deinit(); // Remove the reference from within this function
+            const data = tensor_data.clone(); // Get a reference to the data
+            // Creating the tensor
+            return .{
+                .size = size,
+                .offset = 0,
+                .stride = stride,
+                .dim = dim,
+                .shape = tensor_shape,
+                .data = data,
+                .allocator = allocator,
+            };
+        }
+
         /// Fill a Tensor with a particular value
-        fn fill(self: *Tensor(T), val: T) void {
+        pub fn fill(self: *Tensor(T), val: T) void {
             self.data.fill(val);
         }
 
         /// Get a value from a position in the tensor
-        fn at(self: *Tensor(T), index: []usize) TensorError!T {
+        pub fn at(self: *Tensor(T), index: []usize) TensorError!T {
             // Check that the input index is valid
             if (index.len != self.stride.items.len) {
                 return TensorError.InvalidIndex;
@@ -137,6 +194,44 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
+        /// Create a new Tensor view by reshaping the Tensor to the given shape
+        ///
+        /// Will return an error instead of a new Tensor if the Tensor can't
+        /// be reshaped to the provided shape
+        ///
+        /// Note: Currently this just works on the underlying data of a Tensor
+        /// (i.e. just reshaping the linear memory backing a Tensor), which
+        /// can yield unexpected results when the Tensor being reshaped
+        /// is just a view. It is recommended to clone a Tensor if it is a
+        /// view instead
+        pub fn reshape(self: *Tensor(T), new_shape: []usize) TensorError!T {
+            // Calculate the size from the shape of the Tensor
+            var new_size: usize = 1;
+            for (new_shape) |dim| new_size *= dim;
+            if (new_size != self.size) {
+                return TensorError.InvalidShape;
+            }
+            // Get the number of dimensions
+            const dim = new_shape.len;
+            // Find the stride
+            const stride = try stride_from_shape(new_shape, self.allocator);
+            // Create the shape arraylist
+            var tensor_shape = ArrayList(usize).init(self.allocator);
+            try tensor_shape.appendSlice(new_shape);
+            // Copy the data from the previous array
+            const data = self.data.clone();
+            // Creating the reshaped tensor
+            return .{
+                .size = new_shape,
+                .offset = 0,
+                .stride = stride,
+                .dim = dim,
+                .shape = tensor_shape,
+                .data = data,
+                .allocator = self.allocator,
+            };
+        }
+
         /// Deinitialize a Tensor
         fn deinit(self: *Tensor(T)) void {
             // Free the underlying items
@@ -151,6 +246,87 @@ pub fn Tensor(comptime T: type) type {
     };
 }
 
+/// A helper struct for iterating through the entries
+/// in a Tensor
+pub fn TensorIndexIter(comptime T: type) type {
+    return struct {
+        /// The allocator used for allocating current index
+        allocator: Allocator,
+        /// The strides of the Tensor being indexed
+        tensor_strides: []isize,
+        /// The shape of the Tensor being indexed
+        tensor_shape: []usize,
+        /// The offset of the Tensor being indexed
+        tensor_offset: usize,
+        /// The current index in the Tensor
+        current_tensor_index: []usize,
+        /// The current index in the TensorData
+        current_data_index: usize,
+
+        /// Initialize the Tensor Index Iter to iterate through the
+        /// data in the Tensor
+        fn init(tensor: *Tensor(T)) !TensorIndexIter(T) {
+            const current_tensor_index = try tensor.allocator.alloc(usize, tensor.dim);
+
+            return .{
+                .allocator = tensor.allocator,
+                .tensor_strides = tensor.strides,
+                .tensor_shape = tensor.shape,
+                .tensor_offset = tensor.offset,
+                .current_tensor_index = current_tensor_index,
+                .current_data_index = 0,
+            };
+        }
+
+        /// Free the memory associated with the TensorIndexIter (a slice of usize with
+        /// length equal to the dimensions of the indexed Tensor)
+        fn deinit(self: *TensorIndexIter(T)) void {
+            self.allocator.free(self.current_tensor_index);
+            self.* = undefined;
+        }
+
+        /// Increment the current_data_index to the next
+        /// Tensor index
+        ///
+        /// Returns true if able to increment, and false otherwise
+        fn increment(self: *TensorIndexIter(T)) bool {
+            // Whether to carry to the next index
+            var carry: bool = true;
+            // Current index in the tensor index
+            var index_index: isize = self.tensor_strides.len - 1;
+            // While we need to find something to increment, step through
+            while (carry and index_index >= 0) : (index_index -= 1) {
+                carry = false;
+                // Check if the current index can be incremented without carrying
+                if (self.current_tensor_index[index_index] < self.tensor_shape[index_index] - 1) {
+                    self.current_tensor_index[index_index] += 1;
+                    // No need to carry to the next index
+                    carry = false;
+                } else if (self.current_tensor_index[index_index] == self.tensor_shape[index_index] - 1) {
+                    // To increment, need to carry to next index
+                    // Set the current index to 0, and mark the need to carry
+                    self.current_tensor_index[index_index] = 0;
+                    carry = true;
+                } else {
+                    unreachable;
+                }
+            }
+            // If still needing to carry, the index
+            // was unable to be incremented, return false
+            if (carry) {
+                return false;
+            }
+            // Update the data index
+            var new_data_index = self.tensor_offset;
+            for (self.current_tensor_index, self.tensor_strides) |idx, stride| {
+                new_data_index += idx * @as(usize, @intCast(stride));
+            }
+            self.current_data_index = new_data_index;
+            return true;
+        }
+    };
+}
+
 /// Tensor Errors
 const TensorError = error{
     /// Attempted to access a position with a
@@ -159,8 +335,10 @@ const TensorError = error{
     InvalidIndex,
     /// Attempted to slice with invalid slices
     InvalidSlice,
-    /// Tried to slice with incorrect number of dimensions
-    IncorrectDimensions,
+    /// Attempted to slice with incorrect number of dimensions
+    InvalidDimensions,
+    /// Attempted to reshape a Tensor with an invalid shape
+    InvalidShape,
 };
 
 /// The internal data array of a Tensor, essentially
@@ -189,6 +367,17 @@ fn TensorData(comptime T: type) type {
             rc.* = 1;
             return .{
                 .data = try allocator.alloc(T, size),
+                .allocator = allocator,
+                .ref_count = rc,
+            };
+        }
+
+        /// Create a Tensor data value filled from a passed slice
+        fn initWithSlice(allocator: Allocator, data_slice: []T) !TensorData(T) {
+            const rc = try allocator.create(usize);
+            rc.* = 1;
+            return .{
+                .data = try allocator.dupe(T, data_slice),
                 .allocator = allocator,
                 .ref_count = rc,
             };
@@ -275,6 +464,7 @@ test "Getting stride from shape (1D)" {
 
     try testing.expect(std.mem.eql(isize, expected_stride.items, test_stride.items));
 }
+
 test "Getting stride from shape (3D)" {
     var test_shape = [_]usize{ 2, 3, 5 };
     const test_stride = try stride_from_shape(&test_shape, testing.allocator);
@@ -311,15 +501,23 @@ test "Filling Tensor Data" {
     }
 }
 
+test "Filling Tensor Data From Slice" {
+    var test_array = [_]i32{ 1, 2, 3, 4, 5, 6 };
+    var test_tensor_data = try TensorData(i32).initWithSlice(testing.allocator, &test_array);
+    defer test_tensor_data.deinit();
+
+    try testing.expectEqualSlices(i32, &test_array, test_tensor_data.data);
+}
+
 test "Creating a Tensor (1D)" {
     var test_shape = [_]usize{5};
-    var test_tensor = try Tensor(i32).init(testing.allocator, &test_shape);
+    var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
     defer test_tensor.deinit();
 }
 
 test "Filling a Tensor" {
     var test_shape = [_]usize{ 5, 4 };
-    var test_tensor = try Tensor(i32).init(testing.allocator, &test_shape);
+    var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
     defer test_tensor.deinit();
     // Fill the tensor with 0s
     test_tensor.fill(0);
@@ -334,7 +532,7 @@ test "Filling a Tensor" {
 
 test "Setting a Value" {
     var test_shape = [_]usize{ 5, 4 };
-    var test_tensor = try Tensor(i32).init(testing.allocator, &test_shape);
+    var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
     defer test_tensor.deinit();
     // Fill the tensor with 0s
     test_tensor.fill(0);
