@@ -7,6 +7,7 @@
 const std = @import("std");
 
 pub const tensor = @import("tensor.zig");
+pub const random = @import("random.zig");
 
 test "Tensor" {
     std.testing.refAllDecls(@This());
