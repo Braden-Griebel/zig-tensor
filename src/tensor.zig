@@ -522,13 +522,20 @@ fn TensorData(comptime T: type) type {
     };
 }
 
+/// A slice of a Tensor in a single dimension
 const TensorSlice = struct {
+    /// The start of the slice
     start: ?isize = null,
+    /// The stop position of the slice,
+    /// slice will include everything up
+    /// to (but not including) this position
     stop: ?isize = null,
+    /// Step size of the slice
     step: ?isize = null,
 };
 
 // Helper Functions
+/// Determine the stride of the Tensor from the stride
 fn stride_from_shape(shape: []usize, allocator: Allocator) !ArrayList(isize) {
     var stride = ArrayList(isize).init(allocator);
     try stride.resize(shape.len);
