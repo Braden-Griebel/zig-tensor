@@ -5,6 +5,9 @@ const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+const random = @import("random.zig");
+const Distribution = random.Distribution;
+
 /// A multidimensional container
 pub fn Tensor(comptime T: type) type {
     return struct {
@@ -221,7 +224,7 @@ pub fn Tensor(comptime T: type) type {
         /// (i.e. just reshaping the linear memory backing a Tensor), which
         /// can yield unexpected results when the Tensor being reshaped
         /// is just a view. It is recommended to clone a Tensor if it is a
-        /// view instead
+        /// view prior to using this method.
         pub fn reshape(self: *Tensor(T), new_shape: []usize) TensorError!T {
             // Calculate the size from the shape of the Tensor
             var new_size: usize = 1;
@@ -392,6 +395,9 @@ const TensorError = error{
     InvalidDimensions,
     /// Attempted to reshape a Tensor with an invalid shape
     InvalidShape,
+    /// If an invalid type is used for initialization (i.e.
+    /// trying to create a random normal of ints)
+    InvalidType,
     /// If an allocation fails
     OutOfMemory,
 };
@@ -427,15 +433,63 @@ fn TensorData(comptime T: type) type {
             };
         }
 
-        /// Create a Tensor data value filled from a passed slice
-        fn initWithSlice(allocator: Allocator, data_slice: []T) !TensorData(T) {
+        /// Create a Tensor data instance with the `data_slice` as the backing memory,
+        /// which will be freed using the passed allocator
+        fn initWithSliceTake(allocator: Allocator, data_slice: []T) !TensorData(T) {
             const rc = try allocator.create(usize);
             rc.* = 1;
             return .{
-                .data = try allocator.dupe(T, data_slice),
+                .data = data_slice,
                 .allocator = allocator,
                 .ref_count = rc,
             };
+        }
+
+        /// Create a Tensor data value filled from a passed slice
+        fn initWithSlice(allocator: Allocator, data_slice: []T) !TensorData(T) {
+            const data_slice_copy = try allocator.dupe(T, data_slice);
+            return TensorData(T).initWithSliceTake(allocator, data_slice_copy);
+        }
+
+        /// Initialize a Tensor data value with some size from a random distribution
+        fn initRandom(allocator: Allocator, size: usize, dist: Distribution(T)) !TensorData(T) {
+            const random_sample: ArrayList(T) = try dist.getRvs(allocator, size);
+            defer random_sample.deinit();
+            const random_data: []T = try random_sample.toOwnedSlice();
+            return try TensorData(T).initWithSliceTake(allocator, random_data);
+        }
+
+        /// Initialize a Tensor data value with some size from a random normal distribution
+        fn initRandomNormal(allocator: Allocator, size: usize, loc: T, scale: T) !TensorData(T) {
+            switch (@typeInfo(T)) {
+                .float => {
+                    var prng = std.Random.DefaultPrng.init(blk: {
+                        var seed: u64 = undefined;
+                        try std.posix.getrandom(std.mem.asBytes(&seed));
+                        break :blk seed;
+                    });
+                    const generator = prng.random();
+                    var sampling_distribution = try random.DistNormal(T).init(.{ .generator = generator, .loc = loc, .scale = scale });
+                    const sampler: Distribution(T) = sampling_distribution.distribution();
+                    return try TensorData(T).initRandom(allocator, size, sampler);
+                },
+                else => {
+                    return TensorError.InvalidType;
+                },
+            }
+        }
+
+        /// Initialize a Tensor data value with some size from a random uniform distribution
+        fn initRandomUniform(allocator: Allocator, size: usize, loc: T, scale: T) !TensorData(T) {
+            var prng = std.Random.DefaultPrng.init(blk: {
+                var seed: u64 = undefined;
+                try std.posix.getrandom(std.mem.asBytes(&seed));
+                break :blk seed;
+            });
+            const generator = prng.random();
+            var sampling_distribution = try random.DistUniform(T).init(.{ .generator = generator, .loc = loc, .scale = scale });
+            const sampler = sampling_distribution.distribution();
+            return try TensorData(T).initRandom(allocator, size, sampler);
         }
 
         /// Deinitialize the pointer, if no more references remain,

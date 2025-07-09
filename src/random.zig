@@ -1,3 +1,5 @@
+//! Utility methods for random sampling
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -13,7 +15,7 @@ fn Distribution(comptime T: type) type {
         /// Function to set the scale of a Distribution
         setScaleFn: *const fn (ptr: *anyopaque, scaled: T) anyerror!void,
         /// Function to sample from the distribution
-        getRvsFn: *const fn (ptr: *anyopaque, allocator: Allocator, count: usize) anyerror!ArrayList(f64),
+        getRvsFn: *const fn (ptr: *anyopaque, allocator: Allocator, count: usize) anyerror!ArrayList(T),
 
         /// Set the location of the distribution (e.g. mean for a normal distribution)
         fn setLoc(self: Distribution, loc: T) !void {
@@ -120,18 +122,21 @@ fn DistUniform(comptime T: type) type {
         generator: std.Random,
 
         /// Initialize the distirbution with a loc(minimum), scale(maximum), and generator
-        fn init(args: struct { generator: ?std.Random = null, loc: ?T = null, scale: ?T = null }) !void {
-            const dist_generator = args.generator orelse std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                try std.posix.getrandom(std.mem.asBytes(&seed));
-                break :blk seed;
-            });
+        fn init(args: struct { generator: ?std.Random = null, loc: ?T = null, scale: ?T = null }) !DistUniform(T) {
+            const dist_generator = args.generator orelse geninit: {
+                var prng = std.Random.DefaultPrng.init(blk: {
+                    var seed: u64 = undefined;
+                    try std.posix.getrandom(std.mem.asBytes(&seed));
+                    break :blk seed;
+                });
+                break :geninit prng.random();
+            };
             const dist_loc: T = args.loc orelse @as(T, 0);
             const dist_scale: T = args.scale orelse @as(T, 0);
             return DistUniform(T){
                 .loc = dist_loc,
                 .scale = dist_scale,
-                .generator = dist_generator.random(),
+                .generator = dist_generator,
             };
         }
 
@@ -148,14 +153,14 @@ fn DistUniform(comptime T: type) type {
         }
 
         /// Get `count` samples from a Uniform(loc,scale) distribution
-        fn getRvs(ptr: *anyopaque, allocator: Allocator, count: usize) !ArrayList(T) {
+        fn getRvs(ptr: *anyopaque, allocator: Allocator, count: usize) anyerror!ArrayList(T) {
             const self: *DistUniform(T) = @ptrCast(@alignCast(ptr));
             var samples = try ArrayList(T).initCapacity(allocator, count);
             while (samples.items.len < count) {
                 // Generate a sample of the appropriate numeric type
-                samples.append(switch (@typeInfo(T)) {
-                    .Int => self.generator.intRangeLessThan(T, self.loc, self.scale),
-                    .Float => (self.generator.float(T) * (self.scale - self.loc)) + self.loc,
+                try samples.append(switch (@typeInfo(T)) {
+                    .int => self.generator.intRangeLessThan(T, self.loc, self.scale),
+                    .float => (self.generator.float(T) * (self.scale - self.loc)) + self.loc,
                     else => @compileError("Non-numeric type provided for uniform distribution"),
                 });
             }
@@ -202,4 +207,36 @@ test "Normal Distribution for float64: mean=10,std=3" {
     }
     const test_std = @sqrt(resid_square_sum / @as(sample_type, @floatFromInt(num_samples)));
     try testing.expectApproxEqAbs(desired_std, test_std, 0.1);
+}
+
+test "Uniform Distribution for Int: min=5, max=15" {
+    const sample_type: type = i32;
+    const num_samples: usize = 1000;
+    const desired_min: sample_type = 5;
+    const desired_max: sample_type = 15;
+    // Create the test distribution
+    var test_prng = std.Random.DefaultPrng.init(314);
+    const test_generator = test_prng.random();
+    var test_uniform_dist = try DistUniform(sample_type).init(.{ .generator = test_generator, .loc = desired_min, .scale = desired_max });
+    const test_dist: Distribution(sample_type) = test_uniform_dist.distribution();
+    // Get a sample
+    const samples = try test_dist.getRvs(testing.allocator, num_samples);
+    defer samples.deinit();
+    try testing.expectEqual(num_samples, samples.items.len);
+}
+
+test "Uniform Distribution for Float: min=5, max=15" {
+    const sample_type: type = f32;
+    const num_samples: usize = 1000;
+    const desired_min: sample_type = 5;
+    const desired_max: sample_type = 15;
+    // Create the test distribution
+    var test_prng = std.Random.DefaultPrng.init(314);
+    const test_generator = test_prng.random();
+    var test_uniform_dist = try DistUniform(sample_type).init(.{ .generator = test_generator, .loc = desired_min, .scale = desired_max });
+    const test_dist: Distribution(sample_type) = test_uniform_dist.distribution();
+    // Get a sample
+    const samples = try test_dist.getRvs(testing.allocator, num_samples);
+    defer samples.deinit();
+    try testing.expectEqual(num_samples, samples.items.len);
 }
