@@ -19,23 +19,17 @@ pub fn Tensor(comptime T: type) type {
         data: TensorData(T),
         allocator: Allocator,
 
-        /// Initialize a Tensor with a given shape
-        pub fn initWithShape(allocator: Allocator, shape: []usize) !Tensor(T) {
-            // Calculate the size from the shape of the Tensor
-            var size: usize = 1;
-            for (shape) |dim| size *= dim;
+        /// Initialize a Tensor of a given `shape` with provided TensorData of length `size`,
+        /// this is the base initializer which others pass through
+        fn initWithTensorData(allocator: Allocator, shape: []usize, size: usize, data: TensorData(T)) !Tensor(T) {
             // Get the number of dimensions
             const dim = shape.len;
             // Find the stride
             const stride = try stride_from_shape(shape, allocator);
             // Create the shape arraylist
-            var tensor_shape = ArrayList(usize).init(allocator);
+            var tensor_shape = try ArrayList(usize).initCapacity(allocator, shape.len);
             try tensor_shape.appendSlice(shape);
-            // Allocate the data for the Tensor
-            var tensor_data = try TensorData(T).initWithSize(allocator, size);
-            defer tensor_data.deinit(); // Remove the reference from within this function
-            const data = tensor_data.clone(); // Get a reference to the data
-            // Creating the tensor
+            // Creating the Tensor
             return .{
                 .size = size,
                 .offset = 0,
@@ -45,6 +39,16 @@ pub fn Tensor(comptime T: type) type {
                 .data = data,
                 .allocator = allocator,
             };
+        }
+
+        /// Initialize a Tensor with a given shape
+        pub fn initWithShape(allocator: Allocator, shape: []usize) !Tensor(T) {
+            // Calculate the size from the shape of the Tensor
+            var size: usize = 1;
+            for (shape) |dim| size *= dim;
+            // Allocate the data for the Tensor
+            const tensor_data = try TensorData(T).initWithSize(allocator, size);
+            return try Tensor(T).initWithTensorData(allocator, shape, size, tensor_data);
         }
 
         /// Initialize a Tensor with a given shape, and filled with a value
@@ -52,29 +56,11 @@ pub fn Tensor(comptime T: type) type {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
             for (shape) |dim| size *= dim;
-            // Get the number of dimensions
-            const dim = shape.len;
-            // Find the stride
-            const stride = try stride_from_shape(shape, allocator);
-            // Create the shape arraylist
-            var tensor_shape = ArrayList(usize).init(allocator);
-            try tensor_shape.appendSlice(shape);
             // Allocate the data for the Tensor
             var tensor_data = try TensorData(T).initWithSize(allocator, size);
-            defer tensor_data.deinit(); // Remove the reference from within this funciton
             // Fill the Tensor data with the specified value
             tensor_data.fill(fill_val);
-            const data = tensor_data.clone();
-            // Create and return the Tensor
-            return Tensor(T){
-                .size = size,
-                .offset = 0,
-                .stride = stride,
-                .dim = dim,
-                .shape = tensor_shape,
-                .data = data,
-                .allocator = allocator,
-            };
+            return Tensor(T).initWithTensorData(allocator, shape, size, tensor_data);
         }
 
         /// Initialize a Tensor with a given shape, with data from a slice
@@ -82,27 +68,9 @@ pub fn Tensor(comptime T: type) type {
             // Calculate the size from the shape of the Tensor
             var size: usize = 1;
             for (shape) |dim| size *= dim;
-            // Get the number of dimensions
-            const dim = shape.len;
-            // Find the stride
-            const stride = try stride_from_shape(shape, allocator);
-            // Create the shape arraylist
-            var tensor_shape = ArrayList(usize).init(allocator);
-            try tensor_shape.appendSlice(shape);
             // Allocate the data for the Tensor
-            var tensor_data = try TensorData(T).initWithSlice(allocator, in_data);
-            defer tensor_data.deinit(); // Remove the reference from within this function
-            const data = tensor_data.clone(); // Get a reference to the data
-            // Creating the tensor
-            return .{
-                .size = size,
-                .offset = 0,
-                .stride = stride,
-                .dim = dim,
-                .shape = tensor_shape,
-                .data = data,
-                .allocator = allocator,
-            };
+            const tensor_data = try TensorData(T).initWithSlice(allocator, in_data);
+            return Tensor(T).initWithTensorData(allocator, shape, size, tensor_data);
         }
 
         /// Free memory associated with a Tensor
