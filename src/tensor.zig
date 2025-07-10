@@ -37,8 +37,20 @@ pub fn Tensor(comptime T: type) type {
             const stride = try stride_from_shape(shape, allocator);
             // Create the shape arraylist
             var tensor_shape = try allocator.alloc(usize, shape.len);
-            inline for (shape, 0..) |s, idx| {
-                tensor_shape[idx] = s;
+            switch (@typeInfo(@TypeOf(shape))) {
+                .pointer => {
+                    for (shape, 0..) |s, idx| {
+                        tensor_shape[idx] = s;
+                    }
+                },
+                .@"struct" => {
+                    inline for (shape, 0..) |s, idx| {
+                        tensor_shape[idx] = s;
+                    }
+                },
+                else => {
+                    @compileError("Invalid Type used for shape in Tensor Initialization");
+                },
             }
             // Creating the Tensor
             return .{
@@ -55,8 +67,7 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape
         pub fn initWithShape(allocator: Allocator, shape: anytype) !Self {
             // Calculate the size from the shape of the Tensor
-            var size: usize = 1;
-            inline for (shape) |dim| size *= dim;
+            const size = try Self.get_size_from_shape(shape);
             // Allocate the data for the Tensor
             const tensor_data = try TensorData(T).initWithSize(allocator, size);
             return try Self.initWithTensorData(allocator, shape, size, tensor_data);
@@ -65,8 +76,7 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape, and filled with a value
         pub fn initFilled(allocator: Allocator, shape: anytype, fill_val: T) !Self {
             // Calculate the size from the shape of the Tensor
-            var size: usize = 1;
-            inline for (shape) |dim| size *= dim;
+            const size = try Self.get_size_from_shape(shape);
             // Allocate the data for the Tensor
             var tensor_data = try TensorData(T).initWithSize(allocator, size);
             // Fill the Tensor data with the specified value
@@ -77,8 +87,7 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape, with data from a slice
         pub fn initWithSlice(allocator: Allocator, shape: anytype, in_data: []T) !Self {
             // Calculate the size from the shape of the Tensor
-            var size: usize = 1;
-            inline for (shape) |dim| size *= dim;
+            const size = try Self.get_size_from_shape(shape);
             // Allocate the data for the Tensor
             const tensor_data = try TensorData(T).initWithSlice(allocator, in_data);
             return Self.initWithTensorData(allocator, shape, size, tensor_data);
@@ -97,8 +106,17 @@ pub fn Tensor(comptime T: type) type {
         }
 
         /// Fill a Tensor with a particular value
-        pub fn fill(self: *Self, val: T) void {
-            self.data.fill(val);
+        pub fn fill(self: *Self, val: T) !void {
+            if (self.size == 0) {
+                return;
+            }
+            var tensor_iter = try self.getIndexIter();
+            defer tensor_iter.deinit();
+            var need_iter: bool = true;
+            while (need_iter) {
+                self.data.unwrap()[tensor_iter.current_data_index] = val;
+                need_iter = tensor_iter.increment();
+            }
         }
 
         /// Get a value from a position in the tensor
@@ -295,6 +313,32 @@ pub fn Tensor(comptime T: type) type {
         /// Get an iterator over the Tensor's indices
         pub fn getIndexIter(self: *Self) !TensorIndexIter(T) {
             return try TensorIndexIter(T).init(self);
+        }
+
+        fn get_size_from_shape(shape: anytype) !usize {
+            var size: usize = 1;
+            switch (@typeInfo(@TypeOf(shape))) {
+                .pointer => {
+                    if (shape.len == 0) {
+                        return 0;
+                    }
+                    for (shape) |dim_size| {
+                        size *= dim_size;
+                    }
+                },
+                .@"struct" => {
+                    if (shape.len == 0) {
+                        return 0;
+                    }
+                    inline for (shape) |dim_size| {
+                        size *= dim_size;
+                    }
+                },
+                else => {
+                    return TensorError.InvalidShapeType;
+                },
+            }
+            return size;
         }
     };
 }
@@ -688,7 +732,7 @@ test "Filling a Tensor" {
     var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
     defer test_tensor.deinit();
     // Fill the tensor with 0s
-    test_tensor.fill(0);
+    try test_tensor.fill(0);
     // For each row/col check that the value is 0
     for (0..5) |row| {
         for (0..4) |col| {
@@ -702,7 +746,7 @@ test "Setting a Value" {
     var test_tensor = try Tensor(i32).initWithShape(testing.allocator, &test_shape);
     defer test_tensor.deinit();
     // Fill the tensor with 0s
-    test_tensor.fill(0);
+    try test_tensor.fill(0);
 
     // Set 3,1 to 5
     try test_tensor.set(.{ 3, 1 }, 5);
