@@ -34,7 +34,7 @@ pub fn Tensor(comptime T: type) type {
             // Get the number of dimensions
             const dim = shape.len;
             // Find the stride
-            const stride = try stride_from_shape(shape, allocator);
+            const stride = try strideFromShape(shape, allocator);
             // Create the shape arraylist
             var tensor_shape = try allocator.alloc(usize, shape.len);
             switch (@typeInfo(@TypeOf(shape))) {
@@ -67,7 +67,7 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape
         pub fn initWithShape(allocator: Allocator, shape: anytype) !Self {
             // Calculate the size from the shape of the Tensor
-            const size = try Self.get_size_from_shape(shape);
+            const size = try Self.getSizeFromShape(shape);
             // Allocate the data for the Tensor
             const tensor_data = try TensorData(T).initWithSize(allocator, size);
             return try Self.initWithTensorData(allocator, shape, size, tensor_data);
@@ -76,7 +76,7 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape, and filled with a value
         pub fn initFilled(allocator: Allocator, shape: anytype, fill_val: T) !Self {
             // Calculate the size from the shape of the Tensor
-            const size = try Self.get_size_from_shape(shape);
+            const size = try Self.getSizeFromShape(shape);
             // Allocate the data for the Tensor
             var tensor_data = try TensorData(T).initWithSize(allocator, size);
             // Fill the Tensor data with the specified value
@@ -87,14 +87,14 @@ pub fn Tensor(comptime T: type) type {
         /// Initialize a Tensor with a given shape, with data from a slice
         pub fn initWithSlice(allocator: Allocator, shape: anytype, in_data: []T) !Self {
             // Calculate the size from the shape of the Tensor
-            const size = try Self.get_size_from_shape(shape);
+            const size = try Self.getSizeFromShape(shape);
             // Allocate the data for the Tensor
             const tensor_data = try TensorData(T).initWithSlice(allocator, in_data);
             return Self.initWithTensorData(allocator, shape, size, tensor_data);
         }
 
         /// Free memory associated with a Tensor
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             // Free the underlying items
             self.data.deinit();
             // Deinit the stride
@@ -105,6 +105,46 @@ pub fn Tensor(comptime T: type) type {
             self.* = undefined;
         }
 
+        pub fn binaryFuncInPlace(
+            self: *Self,
+            ufunc: fn (T, T) T,
+            other: *Self,
+        ) anyerror!void {
+            // Any broadcasting will not take place in this in place function,
+            // instead there will be a "binaryFunc" function which will allow for
+            // broadcasting, by creating a broadcasted view of the two Tensors,
+            // and cloneing one, then calling this on the clone
+
+            // Ensure the Tensors have compatible shapes (i.e. the same shape)
+            if (self.dim != other.dim) {
+                return TensorError.IncompatibleShapes;
+            }
+            for (self.shape, other.shape) |self_dim_size, other_dim_size| {
+                if (self_dim_size != other_dim_size) {
+                    return TensorError.IncompatibleShapes;
+                }
+            }
+
+            // Now actually perform the operation
+            // Create iterators for the two tensors data positions
+            var self_iter = try self.getIndexIter();
+            var other_iter = try self.getIndexIter();
+            defer self_iter.deinit();
+            defer other_iter.deinit();
+            // Create variables for holding the indexes to be updated
+            var self_data_index: usize = undefined;
+            var other_data_index: usize = undefined;
+            // Get the underlying Tensor data
+            var self_data: []T = self.data.unwrap();
+            const other_data: []T = other.data.unwrap();
+            // Iterate through each tensor, applying desired operation
+            while (!self_iter.finished and !other_iter.finished) {
+                self_data_index = self_iter.next();
+                other_data_index = other_iter.next();
+                self_data[self_data_index] = ufunc(self_data[self_data_index], other_data[other_data_index]);
+            }
+        }
+
         /// Fill a Tensor with a particular value
         pub fn fill(self: *Self, val: T) !void {
             if (self.size == 0) {
@@ -112,10 +152,10 @@ pub fn Tensor(comptime T: type) type {
             }
             var tensor_iter = try self.getIndexIter();
             defer tensor_iter.deinit();
-            var need_iter: bool = true;
-            while (need_iter) {
-                self.data.unwrap()[tensor_iter.current_data_index] = val;
-                need_iter = tensor_iter.increment();
+
+            var idx: usize = 0;
+            while (!tensor_iter.finished) : (idx += 1) {
+                self.data.unwrap()[tensor_iter.next()] = val;
             }
         }
 
@@ -131,54 +171,43 @@ pub fn Tensor(comptime T: type) type {
         /// specified by index, which must be a tuple with
         /// length equal to the dimensionality of the Tensor
         pub fn at(self: *Self, index: anytype) TensorError!*T {
+            // Check that the input index is valid
+            if (index.len != self.dim) {
+                return TensorError.InvalidIndex;
+            }
+            var position: isize = @intCast(self.offset);
+            // Depending on the type of index, may need an inline for
             switch (@typeInfo(@TypeOf(index))) {
                 .pointer => {
-                    if (index.len != self.dim) {
-                        return TensorError.InvalidIndex;
-                    }
                     // Calculate the position of the desired entry
-                    var position: isize = @intCast(self.offset);
                     for (index, 0..) |location, stride_index| {
                         position += @as(isize, @intCast(location)) * self.stride[stride_index];
                     }
-                    // Get the data slice
-                    const data: []T = self.data.unwrap();
-                    // Bounds check
-                    if (position >= data.len) {
-                        return TensorError.InvalidIndex;
-                    }
-                    // Return a pointer to the desired item
-                    return &data[@as(usize, @intCast(position))];
                 },
                 .@"struct" => {
-                    // Check that the input index is valid
-                    if (index.len != self.dim) {
-                        return TensorError.InvalidIndex;
-                    }
                     // Calculate the position of the desired entry
-                    var position: isize = @intCast(self.offset);
                     inline for (index, 0..) |location, stride_index| {
                         position += @as(isize, @intCast(location)) * self.stride[stride_index];
                     }
-                    // Get the data slice
-                    const data: []T = self.data.unwrap();
-                    // Bounds check
-                    if (position >= data.len) {
-                        return TensorError.InvalidIndex;
-                    }
-                    // Return a pointer to the desired item
-                    return &data[@as(usize, @intCast(position))];
                 },
                 else => {
                     return TensorError.InvalidIndexType;
                 },
             }
+            // Get the data slice
+            const data: []T = self.data.unwrap();
+            // Bounds check
+            if (position >= data.len) {
+                return TensorError.InvalidIndex;
+            }
+            // Return a pointer to the desired item
+            return &data[@as(usize, @intCast(position))];
         }
 
         /// Set a value at a position in the tensor
         /// the index must be a tuple of the same length as the dimensionality
         /// of the Tensor
-        fn set(self: *Self, index: anytype, value: T) TensorError!void {
+        pub fn set(self: *Self, index: anytype, value: T) TensorError!void {
             const to_set = try self.at(index);
             to_set.* = value;
         }
@@ -252,7 +281,7 @@ pub fn Tensor(comptime T: type) type {
             // Get the number of dimensions
             const dim = new_shape.len;
             // Find the stride
-            const stride = try stride_from_shape(new_shape, self.allocator);
+            const stride = try strideFromShape(new_shape, self.allocator);
             // Create the shape arraylist
             var tensor_shape = ArrayList(usize).init(self.allocator);
             try tensor_shape.appendSlice(new_shape);
@@ -285,19 +314,13 @@ pub fn Tensor(comptime T: type) type {
             var old_tensor_iter = try self.getIndexIter();
             defer old_tensor_iter.deinit();
 
-            for (0..self.size) |idx| {
-                // Copy over the data
-                data_items[idx] = self.data.unwrap()[old_tensor_iter.current_data_index];
-                // Increment the old tensor iterator, and if that can no longer iterate,
-                // break the loop
-                if (!old_tensor_iter.increment()) {
-                    std.debug.assert(idx == self.size - 1);
-                    break;
-                }
+            var idx: usize = 0;
+            while (!old_tensor_iter.finished) : (idx += 1) {
+                data_items[idx] = self.data.unwrap()[old_tensor_iter.next()];
             }
 
             // Get the stride of the new tensor
-            const new_tensor_stride = try stride_from_shape(self.shape, self.allocator);
+            const new_tensor_stride = try strideFromShape(self.shape, self.allocator);
 
             return Self{
                 .size = self.size,
@@ -311,25 +334,117 @@ pub fn Tensor(comptime T: type) type {
         }
 
         /// Get an iterator over the Tensor's indices
-        pub fn getIndexIter(self: *Self) !TensorIndexIter(T) {
+        fn getIndexIter(self: *Self) !TensorIndexIter(T) {
             return try TensorIndexIter(T).init(self);
         }
 
-        fn get_size_from_shape(shape: anytype) !usize {
+        /// Create a new Tensor broadcasted to have shape matching
+        /// `broadcast_shape`
+        ///
+        /// Returns a TensorErorr.IncompatibleShapes if unable to broadcast
+        fn broadcast(self: *Self, broadcast_shape: []usize) !Tensor(T) {
+            // If self is longer than broadcast shape,
+            // broadcasting is impossible
+            if (self.len > broadcast_shape.len) {
+                return TensorError.IncompatibleShapes;
+            }
+
+            // Basically, adding strides of 0 for
+            // dimensions that either don't exist or
+            // are of length 1
+            var broadcast_strides = try self.allocator.alloc(isize, broadcast_shape.len);
+            errdefer self.allocator.free(broadcast_strides);
+
+            // Create indices for self strides and broadcast strides,
+            // then iterate backward through the arrays until self if used
+            // up, then just set everything else to 1
+            const self_shape = self.shape;
+            const self_strides = self.strides;
+            var self_idx = self_strides.len;
+            std.debug.assert(self.shape.len == self.stride.len);
+            var b_idx = broadcast_strides.len;
+            while (self_idx > 0) {
+                self_idx -= 1;
+                b_idx -= 1;
+                if (self_shape[self_idx] == broadcast_shape[b_idx]) {
+                    broadcast_strides[b_idx] = self_strides[self_idx];
+                } else if (self_shape[self_idx] == 1) {
+                    broadcast_strides[b_idx] = 0;
+                } else {
+                    return TensorError.IncompatibleShapes;
+                }
+            }
+            while (b_idx > 0) {
+                b_idx -= 1;
+                broadcast_strides[b_idx] = 0;
+            }
+            // Create the values for the broadcasted_tensor
+            const broadcast_shape_new = try self.allocator.dupe(usize, broadcast_shape);
+            var broadcast_size = 1;
+            if (broadcast_shape_new.len != 0) {
+                for (broadcast_shape_new) |dim_size| {
+                    broadcast_size *= dim_size;
+                }
+            } else {
+                broadcast_size = 0;
+            }
+
+            return Self{
+                .size = broadcast_shape_new,
+                .offset = self.offset,
+                .stride = broadcast_strides,
+                .shape = broadcast_shape_new,
+                .dim = broadcast_shape.len,
+                .data = self.data.clone(),
+                .allocator = self.allocator,
+            };
+        }
+
+        fn getBroadcastShape(allocator: Allocator, shape1: []usize, shape2: []usize) ![]usize {
+            const longer_shape = if (shape1.len >= shape2.len) shape1 else shape2;
+            const shorter_shape = if (shape1.len >= shape2.len) shape2 else shape1;
+            const broadcastDim = longer_shape.len;
+            var broadcast_shape = try allocator.alloc(usize, broadcastDim);
+            errdefer allocator.free(broadcast_shape);
+            var l_idx = longer_shape.len;
+            var s_idx = shorter_shape.len;
+            var b_idx = broadcast_shape.len;
+            while (s_idx > 0) {
+                b_idx -= 1;
+                l_idx -= 1;
+                s_idx -= 1;
+                if (longer_shape[l_idx] == shorter_shape[s_idx]) {
+                    broadcast_shape[b_idx] = longer_shape[l_idx];
+                } else if (longer_shape[l_idx] == 1) {
+                    broadcast_shape[b_idx] = shorter_shape[s_idx];
+                } else if (shorter_shape[s_idx] == 1) {
+                    broadcast_shape[b_idx] = longer_shape[l_idx];
+                } else {
+                    return TensorError.IncompatibleShapes;
+                }
+            }
+            while (b_idx > 0 and l_idx > 0) {
+                b_idx -= 1;
+                l_idx -= 1;
+                broadcast_shape[b_idx] = longer_shape[l_idx];
+            }
+            return broadcast_shape;
+        }
+
+        /// Get the size of a Tensor from a shape
+        /// The shape can be a slice, or an anonymous struct
+        fn getSizeFromShape(shape: anytype) !usize {
+            if (shape.len == 0) {
+                return 0;
+            }
             var size: usize = 1;
             switch (@typeInfo(@TypeOf(shape))) {
                 .pointer => {
-                    if (shape.len == 0) {
-                        return 0;
-                    }
                     for (shape) |dim_size| {
                         size *= dim_size;
                     }
                 },
                 .@"struct" => {
-                    if (shape.len == 0) {
-                        return 0;
-                    }
                     inline for (shape) |dim_size| {
                         size *= dim_size;
                     }
@@ -347,6 +462,7 @@ pub fn Tensor(comptime T: type) type {
 /// in a Tensor
 pub fn TensorIndexIter(comptime T: type) type {
     return struct {
+        const Self = @This();
         /// The allocator used for allocating current index
         allocator: Allocator,
         /// The strides of the Tensor being indexed
@@ -359,6 +475,8 @@ pub fn TensorIndexIter(comptime T: type) type {
         current_tensor_index: []usize,
         /// The current index in the TensorData
         current_data_index: usize,
+        /// Whether the iteration has completed
+        finished: bool = false,
 
         /// Initialize the Tensor Index Iter to iterate through the
         /// data in the Tensor
@@ -373,6 +491,7 @@ pub fn TensorIndexIter(comptime T: type) type {
                 .tensor_offset = tensor.offset,
                 .current_tensor_index = current_tensor_index,
                 .current_data_index = tensor.offset,
+                .finished = false,
             };
         }
 
@@ -385,9 +504,7 @@ pub fn TensorIndexIter(comptime T: type) type {
 
         /// Increment the current_data_index to the next
         /// Tensor index
-        ///
-        /// Returns true if able to increment, and false otherwise
-        fn increment(self: *TensorIndexIter(T)) bool {
+        fn increment(self: *TensorIndexIter(T)) void {
             // Whether to carry to the next index
             var carry: bool = true;
             // Current index in the tensor index
@@ -411,9 +528,10 @@ pub fn TensorIndexIter(comptime T: type) type {
                 }
             }
             // If still needing to carry, the index
-            // was unable to be incremented, return false
+            // was unable to be incremented, iteration
+            // has finished
             if (carry) {
-                return false;
+                self.finished = true;
             }
             // Update the data index
             var new_data_index = self.tensor_offset;
@@ -421,13 +539,27 @@ pub fn TensorIndexIter(comptime T: type) type {
                 new_data_index += idx * @as(usize, @intCast(stride));
             }
             self.current_data_index = new_data_index;
-            return true;
+        }
+
+        /// Return the next data index, if
+        /// the iteration has completed returns null instead
+        fn next(self: *Self) usize {
+            // Get the current index (done before incrementing so that
+            // the first index returned is the first of the Tensor)
+            const next_index = self.current_data_index;
+            // Increment the data index to the next position
+            self.increment();
+            // Return the data index
+            return next_index;
         }
     };
 }
 
 /// Tensor Errors
 const TensorError = error{
+    /// The Tensors do not have compatible shapes
+    /// for the attempted operation
+    IncompatibleShapes,
     /// Attempted to access a position with a
     /// invalid index (wrong index dimension,
     /// or out of bounds)
@@ -584,7 +716,7 @@ const TensorSlice = struct {
 
 // Helper Functions
 /// Determine the stride of the Tensor from a stride tuple
-fn stride_from_shape(shape: anytype, allocator: Allocator) ![]isize {
+fn strideFromShape(shape: anytype, allocator: Allocator) ![]isize {
     switch (@typeInfo(@TypeOf(shape))) {
         .pointer => { // Pointers are treated as slices
             const stride: []isize = try allocator.alloc(isize, shape.len);
@@ -640,7 +772,7 @@ fn stride_from_shape(shape: anytype, allocator: Allocator) ![]isize {
 
 // TESTS
 test "Getting stride from shape (0D)" {
-    const test_stride = try stride_from_shape(.{}, testing.allocator);
+    const test_stride = try strideFromShape(.{}, testing.allocator);
     defer testing.allocator.free(test_stride);
 
     var expected_stride_array = [_]isize{};
@@ -652,7 +784,7 @@ test "Getting stride from shape (0D)" {
 }
 
 test "Getting stride from shape (1D)" {
-    const test_stride = try stride_from_shape(.{5}, testing.allocator);
+    const test_stride = try strideFromShape(.{5}, testing.allocator);
     defer testing.allocator.free(test_stride);
 
     const expected_stride = [_]isize{1};
@@ -661,7 +793,7 @@ test "Getting stride from shape (1D)" {
 }
 
 test "Getting stride from shape (3D)" {
-    const test_stride = try stride_from_shape(.{ 2, 3, 5 }, testing.allocator);
+    const test_stride = try strideFromShape(.{ 2, 3, 5 }, testing.allocator);
     defer testing.allocator.free(test_stride);
 
     var expected_stride_array = [_]isize{ 15, 5, 1 };
@@ -819,4 +951,53 @@ test "Cloning a Sliced Tensor" {
     try testing.expectEqual(4, test_tensor_cloned.get(.{ 1, 0 }));
 
     try testing.expectEqual(5, test_tensor_cloned.get(.{ 1, 1 }));
+}
+
+// Helper for below test
+fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+test "Inplace Binary Function" {
+    // Create two tensors to add together
+    var test_tensor1_data = [_]i32{ 1, 2, 3, 4, 5, 6 };
+    var test_tensor1 = try Tensor(i32).initWithSlice(testing.allocator, .{ 3, 2 }, &test_tensor1_data);
+    defer test_tensor1.deinit();
+    var test_tensor2_data = [_]i32{ 6, 5, 4, 3, 2, 1 };
+    var test_tensor2 = try Tensor(i32).initWithSlice(testing.allocator, .{ 3, 2 }, &test_tensor2_data);
+    defer test_tensor2.deinit();
+    // Add the two tensors
+    try test_tensor1.binaryFuncInPlace(add, &test_tensor2);
+    // All of the entried in test_tensor1 should now be 7
+    for (test_tensor1.data.unwrap()) |val| {
+        try testing.expectEqual(7, val);
+    }
+}
+
+fn broadcast_shape_test(shape1: anytype, shape2: anytype, expected_shape: anytype) !void {
+    var shape1_slice = try testing.allocator.alloc(usize, shape1.len);
+    defer testing.allocator.free(shape1_slice);
+    var shape2_slice = try testing.allocator.alloc(usize, shape2.len);
+    defer testing.allocator.free(shape2_slice);
+    var expected_slice = try testing.allocator.alloc(usize, expected_shape.len);
+    defer testing.allocator.free(expected_slice);
+    inline for (shape1, 0..) |s, idx| {
+        shape1_slice[idx] = s;
+    }
+    inline for (shape2, 0..) |s, idx| {
+        shape2_slice[idx] = s;
+    }
+    inline for (expected_shape, 0..) |s, idx| {
+        expected_slice[idx] = s;
+    }
+    const actual_shape = try Tensor(i1).getBroadcastShape(testing.allocator, shape1_slice, shape2_slice);
+    defer testing.allocator.free(actual_shape);
+    try testing.expectEqualSlices(usize, expected_slice, actual_shape);
+}
+test "Getting Broadcast Shape" {
+    try broadcast_shape_test(.{1}, .{5}, .{5});
+    try broadcast_shape_test(.{5}, .{ 3, 4, 2, 5 }, .{ 3, 4, 2, 5 });
+    try broadcast_shape_test(.{ 6, 2, 4, 1, 5, 7 }, .{ 6, 2, 4, 9, 5, 7 }, .{ 6, 2, 4, 9, 5, 7 });
+    try broadcast_shape_test(.{}, .{}, .{});
+    try broadcast_shape_test(.{ 2, 3 }, .{3}, .{ 2, 3 });
+    try testing.expectError(TensorError.IncompatibleShapes, broadcast_shape_test(.{ 3, 4, 5 }, .{ 6, 4, 5 }, .{}));
 }
