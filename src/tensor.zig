@@ -105,11 +105,32 @@ pub fn Tensor(comptime T: type) type {
             self.* = undefined;
         }
 
+        /// Apply a binary function elementwise to self and other, returns a new Tensor
+        pub fn binaryFunc(self: *Self, ufunc: fn (T, T) T, other: *Self) !Self {
+            // Get broadcast shape
+            const broadcast_shape = Self.getBroadcastShape(self.allocator, self.shape, other.shape);
+            defer self.allocator.free(broadcast_shape);
+            // Broadcast self and other to common shape, creating a new "self" Tensor
+            var self_broadcasted = try self.broadcast(broadcast_shape).clone();
+            var other_broadcasted = try other.broadcast(broadcast_shape);
+            defer other_broadcasted.deinit();
+            // Perform the operation
+            try self_broadcasted.binaryFuncInPlace(ufunc, &other_broadcasted);
+            return self_broadcasted;
+        }
+
+        /// Apply a binary function elementwise to self and other, updating
+        /// self with the result
+        ///
+        /// Note: No broadcasting occurs with this function,
+        /// if broadcasting is needed either call broadcast
+        /// on other before feeding into this function,
+        /// or use the non-inplace version
         pub fn binaryFuncInPlace(
             self: *Self,
             ufunc: fn (T, T) T,
             other: *Self,
-        ) anyerror!void {
+        ) !void {
             // Any broadcasting will not take place in this in place function,
             // instead there will be a "binaryFunc" function which will allow for
             // broadcasting, by creating a broadcasted view of the two Tensors,
@@ -717,57 +738,40 @@ const TensorSlice = struct {
 // Helper Functions
 /// Determine the stride of the Tensor from a stride tuple
 fn strideFromShape(shape: anytype, allocator: Allocator) ![]isize {
+    const stride: []isize = try allocator.alloc(isize, shape.len);
+    errdefer allocator.free(stride);
+    if (shape.len == 0) {
+        return stride;
+    }
     switch (@typeInfo(@TypeOf(shape))) {
         .pointer => { // Pointers are treated as slices
-            const stride: []isize = try allocator.alloc(isize, shape.len);
-
-            if (shape.len == 0) {
-                return stride;
-            }
             // Move the values from the shape into the stride
             for (shape, 0..) |s, stride_index| {
                 stride[stride_index] = @as(isize, @intCast(s));
             }
-            // Iterate through the stride slice in reverse,
-            // updating the values to create the correct stride
-            var accumulator: isize = 1;
-            var stride_index = shape.len;
-            var tmp: isize = undefined;
-            while (stride_index > 0) {
-                stride_index -= 1;
-                tmp = stride[stride_index];
-                stride[stride_index] = accumulator;
-                accumulator *= tmp;
-            }
-            return stride;
         },
         .@"struct" => { // Anonymous struct, requires an inline for loop
-            const stride: []isize = try allocator.alloc(isize, shape.len);
-
-            if (shape.len == 0) {
-                return stride;
-            }
             // Move the values from the shape into the stride
             inline for (shape, 0..) |s, stride_index| {
                 stride[stride_index] = @as(isize, @intCast(s));
             }
-            // Iterate through the stride slice in reverse,
-            // updating the values to create the correct stride
-            var accumulator: isize = 1;
-            var stride_index = shape.len;
-            var tmp: isize = undefined;
-            while (stride_index > 0) {
-                stride_index -= 1;
-                tmp = stride[stride_index];
-                stride[stride_index] = accumulator;
-                accumulator *= tmp;
-            }
-            return stride;
         },
         else => {
             return TensorError.InvalidShapeType;
         },
     }
+    // Iterate through the stride slice in reverse,
+    // updating the values to create the correct stride
+    var accumulator: isize = 1;
+    var stride_index = shape.len;
+    var tmp: isize = undefined;
+    while (stride_index > 0) {
+        stride_index -= 1;
+        tmp = stride[stride_index];
+        stride[stride_index] = accumulator;
+        accumulator *= tmp;
+    }
+    return stride;
 }
 
 // TESTS
