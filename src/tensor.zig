@@ -137,6 +137,7 @@ pub fn Tensor(comptime T: type) type {
             defer self.allocator.free(broadcast_shape);
             // Broadcast self and other to common shape, creating a new "self" Tensor
             var self_broadcasted = try self.broadcast(broadcast_shape);
+            defer self_broadcasted.deinit();
             var self_broadcasted_clone = try self_broadcasted.clone();
             var other_broadcasted = try other.broadcast(broadcast_shape);
             defer other_broadcasted.deinit();
@@ -1092,7 +1093,6 @@ test "Getting Broadcast Shape" {
 }
 
 test "Binary Function Broadcast" {
-    @breakpoint();
     var test_left_tensor = try Tensor(i32).initWithSlice(testing.allocator, .{ 3, 2 }, .{ 1, 2, 3, 4, 5, 6 });
     defer test_left_tensor.deinit();
     var test_right_tensor = try Tensor(i32).initWithSlice(testing.allocator, .{2}, .{ 3, 4 });

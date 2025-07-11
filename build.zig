@@ -15,6 +15,14 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
 
+    // Add an lldb step for tests
+    const lldb = b.addSystemCommand(&.{
+        "lldb", "--",
+    });
+    lldb.addArtifactArg(mod_tests);
+    const lldb_step = b.step("debug", "Run the tests under lldb");
+    lldb_step.dependOn(&lldb.step);
+
     // A run step that will run the executable
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
