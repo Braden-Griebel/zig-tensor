@@ -114,7 +114,7 @@ pub fn Tensor(comptime T: type) type {
             // Get a clone of self to return
             var new_tensor = try self.clone();
             // Apply the function to the new tensor in place
-            new_tensor.unaryFuncInPlace(ufunc);
+            try new_tensor.unaryFuncInPlace(ufunc);
             // Return the updated Tensor
             return new_tensor;
         }
@@ -124,6 +124,7 @@ pub fn Tensor(comptime T: type) type {
         pub fn unaryFuncInPlace(self: *Self, ufunc: fn (T) T) !void {
             // Get an iterator over the values of the tensor
             var val_iter = try TensorValueIter(T).init(self);
+            defer val_iter.deinit();
             // Update self with the new values
             while (val_iter.next()) |val| {
                 val.* = ufunc(val.*);
@@ -282,19 +283,42 @@ pub fn Tensor(comptime T: type) type {
             const new_allocator = self.allocator;
 
             // Iterate through the slices to update the values
-            for (indices, 0..) |s, idx| {
-                const slice_start = s.start orelse 0;
-                const slice_step = s.step orelse 1;
-                const slice_stop = s.stop orelse @as(isize, @intCast(self.shape[idx]));
-                const dim_size = @as(usize, @intCast(@divFloor((slice_stop - slice_start), slice_step)));
-                // Update the size
-                new_size *= dim_size;
-                // Update the shape
-                new_shape[idx] = dim_size;
-                // Update the stride
-                new_stride[idx] = slice_step * self.stride[idx];
-                // Update the offset
-                new_offset += @as(usize, @intCast(self.stride[idx] * slice_start));
+            switch (@typeInfo(@TypeOf(indices))) {
+                .pointer => {
+                    for (indices, 0..) |s, idx| {
+                        const slice_start = s.start orelse 0;
+                        const slice_step = s.step orelse 1;
+                        const slice_stop = s.stop orelse @as(isize, @intCast(self.shape[idx]));
+                        const dim_size = @as(usize, @intCast(@divFloor((slice_stop - slice_start), slice_step)));
+                        // Update the size
+                        new_size *= dim_size;
+                        // Update the shape
+                        new_shape[idx] = dim_size;
+                        // Update the stride
+                        new_stride[idx] = slice_step * self.stride[idx];
+                        // Update the offset
+                        new_offset += @as(usize, @intCast(self.stride[idx] * slice_start));
+                    }
+                },
+                .@"struct" => {
+                    inline for (indices, 0..) |s, idx| {
+                        const slice_start = s.start orelse 0;
+                        const slice_step = s.step orelse 1;
+                        const slice_stop = s.stop orelse @as(isize, @intCast(self.shape[idx]));
+                        const dim_size = @as(usize, @intCast(@divFloor((slice_stop - slice_start), slice_step)));
+                        // Update the size
+                        new_size *= dim_size;
+                        // Update the shape
+                        new_shape[idx] = dim_size;
+                        // Update the stride
+                        new_stride[idx] = slice_step * self.stride[idx];
+                        // Update the offset
+                        new_offset += @as(usize, @intCast(self.stride[idx] * slice_start));
+                    }
+                },
+                else => {
+                    @compileError("Tried to slice with invalid type, must be a slice or tuple of TensorSlices");
+                },
             }
             // Return the newly created tensor
             return .{
@@ -1090,6 +1114,19 @@ test "Getting Broadcast Shape" {
     try broadcast_shape_test(.{}, .{}, .{});
     try broadcast_shape_test(.{ 2, 3 }, .{3}, .{ 2, 3 });
     try testing.expectError(TensorError.IncompatibleShapes, broadcast_shape_test(.{ 3, 4, 5 }, .{ 6, 4, 5 }, .{}));
+}
+
+test "Unary function application" {
+    const PI = std.math.pi;
+    var test_data = [_]f32{ 0.0, PI / 6.0, PI / 2.0, 5.0 * PI / 6.0, PI, 7.0 * PI / 6.0 };
+    const expected_result = [_]f32{ 0, 0.5, 1, 0.5, 0, -0.5 };
+    var test_tensor = try Tensor(f32).initWithSlice(testing.allocator, .{ 3, 2 }, &test_data);
+    defer test_tensor.deinit();
+    var actual_result_tensor = try test_tensor.unaryFunc(uFuncs(f32).sin);
+    defer actual_result_tensor.deinit();
+    for (expected_result, actual_result_tensor.data.unwrap()) |expected, actual| {
+        try testing.expectApproxEqAbs(expected, actual, 1e-7);
+    }
 }
 
 test "Binary Function Broadcast" {
