@@ -7,6 +7,9 @@ const testing = std.testing;
 
 const random = @import("random.zig");
 const Distribution = random.Distribution;
+const functions = @import("tensor_functions.zig");
+const uFuncs = functions.UFunc;
+const bFuncs = functions.BFunc;
 
 /// A multidimensional container
 pub fn Tensor(comptime T: type) type {
@@ -84,8 +87,8 @@ pub fn Tensor(comptime T: type) type {
             return Self.initWithTensorData(allocator, shape, size, tensor_data);
         }
 
-        /// Initialize a Tensor with a given shape, with data from a slice
-        pub fn initWithSlice(allocator: Allocator, shape: anytype, in_data: []T) !Self {
+        /// Initialize a Tensor with a given shape, with data from a slice (or anonymous struct)
+        pub fn initWithSlice(allocator: Allocator, shape: anytype, in_data: anytype) !Self {
             // Calculate the size from the shape of the Tensor
             const size = try Self.getSizeFromShape(shape);
             // Allocate the data for the Tensor
@@ -105,18 +108,41 @@ pub fn Tensor(comptime T: type) type {
             self.* = undefined;
         }
 
+        /// Apply a unary function elementwise to self, returning
+        /// a new Tensor with the results
+        pub fn unaryFunc(self: *Self, ufunc: fn (T) T) !Self {
+            // Get a clone of self to return
+            var new_tensor = try self.clone();
+            // Apply the function to the new tensor in place
+            new_tensor.unaryFuncInPlace(ufunc);
+            // Return the updated Tensor
+            return new_tensor;
+        }
+
+        /// Apply a unary function elementwise to self, updating self
+        /// with the result
+        pub fn unaryFuncInPlace(self: *Self, ufunc: fn (T) T) !void {
+            // Get an iterator over the values of the tensor
+            var val_iter = try TensorValueIter(T).init(self);
+            // Update self with the new values
+            while (val_iter.next()) |val| {
+                val.* = ufunc(val.*);
+            }
+        }
+
         /// Apply a binary function elementwise to self and other, returns a new Tensor
-        pub fn binaryFunc(self: *Self, ufunc: fn (T, T) T, other: *Self) !Self {
+        pub fn binaryFunc(self: *Self, bfunc: fn (T, T) T, other: *Self) !Self {
             // Get broadcast shape
-            const broadcast_shape = Self.getBroadcastShape(self.allocator, self.shape, other.shape);
+            const broadcast_shape = try Self.getBroadcastShape(self.allocator, self.shape, other.shape);
             defer self.allocator.free(broadcast_shape);
             // Broadcast self and other to common shape, creating a new "self" Tensor
-            var self_broadcasted = try self.broadcast(broadcast_shape).clone();
+            var self_broadcasted = try self.broadcast(broadcast_shape);
+            var self_broadcasted_clone = try self_broadcasted.clone();
             var other_broadcasted = try other.broadcast(broadcast_shape);
             defer other_broadcasted.deinit();
             // Perform the operation
-            try self_broadcasted.binaryFuncInPlace(ufunc, &other_broadcasted);
-            return self_broadcasted;
+            try self_broadcasted_clone.binaryFuncInPlace(bfunc, &other_broadcasted);
+            return self_broadcasted_clone;
         }
 
         /// Apply a binary function elementwise to self and other, updating
@@ -128,7 +154,7 @@ pub fn Tensor(comptime T: type) type {
         /// or use the non-inplace version
         pub fn binaryFuncInPlace(
             self: *Self,
-            ufunc: fn (T, T) T,
+            bfunc: fn (T, T) T,
             other: *Self,
         ) !void {
             // Any broadcasting will not take place in this in place function,
@@ -149,7 +175,7 @@ pub fn Tensor(comptime T: type) type {
             // Now actually perform the operation
             // Create iterators for the two tensors data positions
             var self_iter = try self.getIndexIter();
-            var other_iter = try self.getIndexIter();
+            var other_iter = try other.getIndexIter();
             defer self_iter.deinit();
             defer other_iter.deinit();
             // Create variables for holding the indexes to be updated
@@ -162,7 +188,7 @@ pub fn Tensor(comptime T: type) type {
             while (!self_iter.finished and !other_iter.finished) {
                 self_data_index = self_iter.next().?;
                 other_data_index = other_iter.next().?;
-                self_data[self_data_index] = ufunc(self_data[self_data_index], other_data[other_data_index]);
+                self_data[self_data_index] = bfunc(self_data[self_data_index], other_data[other_data_index]);
             }
         }
 
@@ -365,7 +391,7 @@ pub fn Tensor(comptime T: type) type {
         fn broadcast(self: *Self, broadcast_shape: []usize) !Tensor(T) {
             // If self is longer than broadcast shape,
             // broadcasting is impossible
-            if (self.len > broadcast_shape.len) {
+            if (self.dim > broadcast_shape.len) {
                 return TensorError.IncompatibleShapes;
             }
 
@@ -379,7 +405,7 @@ pub fn Tensor(comptime T: type) type {
             // then iterate backward through the arrays until self if used
             // up, then just set everything else to 1
             const self_shape = self.shape;
-            const self_strides = self.strides;
+            const self_strides = self.stride;
             var self_idx = self_strides.len;
             std.debug.assert(self.shape.len == self.stride.len);
             var b_idx = broadcast_strides.len;
@@ -400,7 +426,7 @@ pub fn Tensor(comptime T: type) type {
             }
             // Create the values for the broadcasted_tensor
             const broadcast_shape_new = try self.allocator.dupe(usize, broadcast_shape);
-            var broadcast_size = 1;
+            var broadcast_size: usize = 1;
             if (broadcast_shape_new.len != 0) {
                 for (broadcast_shape_new) |dim_size| {
                     broadcast_size *= dim_size;
@@ -410,7 +436,7 @@ pub fn Tensor(comptime T: type) type {
             }
 
             return Self{
-                .size = broadcast_shape_new,
+                .size = broadcast_size,
                 .offset = self.offset,
                 .stride = broadcast_strides,
                 .shape = broadcast_shape_new,
@@ -578,6 +604,49 @@ pub fn TensorIndexIter(comptime T: type) type {
     };
 }
 
+/// Iterate over the values of a Tensor in row major order
+pub fn TensorValueIter(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        /// A pointer to the underlying TensorData array
+        tensor_data: []T,
+        /// An iterator over the indices of the Tensor
+        index_iter: TensorIndexIter(T),
+
+        /// Initialize the TensorValueIter to iterate through the
+        /// data in the Tensor
+        fn init(tensor: *Tensor(T)) !TensorValueIter(T) {
+            const tensor_data = tensor.data.unwrap();
+            const index_iter = try TensorIndexIter(T).init(tensor);
+            return Self{
+                .tensor_data = tensor_data,
+                .index_iter = index_iter,
+            };
+        }
+
+        /// Free the memory associated with the TensorValueIter
+        /// (a slice of usize with length equal to the dimentions of the indexed Tensor)
+        fn deinit(self: *Self) void {
+            // Only deallocate the
+            self.index_iter.deinit();
+        }
+
+        /// Return the next value of the Tensor,
+        /// if the iteration has completed returns null instead
+        fn next(self: *Self) ?*T {
+            if (self.index_iter.finished) {
+                return null;
+            }
+            // Get the current index
+            const next_index = self.index_iter.current_data_index;
+            // Increment the index iterator
+            self.index_iter.increment();
+            // Return a pointer to the
+            return &self.tensor_data[next_index];
+        }
+    };
+}
+
 /// Tensor Errors
 const TensorError = error{
     /// The Tensors do not have compatible shapes
@@ -648,9 +717,23 @@ fn TensorData(comptime T: type) type {
             };
         }
 
-        /// Create a Tensor data value filled from a passed slice
-        fn initWithSlice(allocator: Allocator, data_slice: []T) !TensorData(T) {
-            const data_slice_copy = try allocator.dupe(T, data_slice);
+        /// Create a Tensor data value filled from a passed slice (or anonymous struct)
+        fn initWithSlice(allocator: Allocator, data_slice: anytype) !TensorData(T) {
+            var data_slice_copy: []T = undefined;
+            switch (@typeInfo(@TypeOf(data_slice))) {
+                .pointer => {
+                    data_slice_copy = try allocator.dupe(T, data_slice);
+                },
+                .@"struct" => {
+                    data_slice_copy = try allocator.alloc(T, data_slice.len);
+                    inline for (data_slice, 0..) |data, idx| {
+                        data_slice_copy[idx] = data;
+                    }
+                },
+                else => {
+                    @compileError("Tried to create Tensor data from invalid type, must be either slice or struct");
+                },
+            }
             return TensorData(T).initWithSliceTake(allocator, data_slice_copy);
         }
 
@@ -1006,4 +1089,22 @@ test "Getting Broadcast Shape" {
     try broadcast_shape_test(.{}, .{}, .{});
     try broadcast_shape_test(.{ 2, 3 }, .{3}, .{ 2, 3 });
     try testing.expectError(TensorError.IncompatibleShapes, broadcast_shape_test(.{ 3, 4, 5 }, .{ 6, 4, 5 }, .{}));
+}
+
+test "Binary Function Broadcast" {
+    @breakpoint();
+    var test_left_tensor = try Tensor(i32).initWithSlice(testing.allocator, .{ 3, 2 }, .{ 1, 2, 3, 4, 5, 6 });
+    defer test_left_tensor.deinit();
+    var test_right_tensor = try Tensor(i32).initWithSlice(testing.allocator, .{2}, .{ 3, 4 });
+    defer test_right_tensor.deinit();
+    var expected_result = try Tensor(i32).initWithSlice(testing.allocator, .{ 3, 2 }, .{ 4, 6, 6, 8, 8, 10 });
+    defer expected_result.deinit();
+    var actual_result = try test_left_tensor.binaryFunc(
+        bFuncs(i32).add,
+        &test_right_tensor,
+    );
+    defer actual_result.deinit();
+    // Check the shape and underlying data
+    try testing.expectEqualSlices(usize, expected_result.shape, actual_result.shape);
+    try testing.expectEqualSlices(i32, expected_result.data.unwrap(), actual_result.data.unwrap());
 }
