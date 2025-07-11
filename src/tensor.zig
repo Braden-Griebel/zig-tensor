@@ -160,8 +160,8 @@ pub fn Tensor(comptime T: type) type {
             const other_data: []T = other.data.unwrap();
             // Iterate through each tensor, applying desired operation
             while (!self_iter.finished and !other_iter.finished) {
-                self_data_index = self_iter.next();
-                other_data_index = other_iter.next();
+                self_data_index = self_iter.next().?;
+                other_data_index = other_iter.next().?;
                 self_data[self_data_index] = ufunc(self_data[self_data_index], other_data[other_data_index]);
             }
         }
@@ -174,9 +174,8 @@ pub fn Tensor(comptime T: type) type {
             var tensor_iter = try self.getIndexIter();
             defer tensor_iter.deinit();
 
-            var idx: usize = 0;
-            while (!tensor_iter.finished) : (idx += 1) {
-                self.data.unwrap()[tensor_iter.next()] = val;
+            while (tensor_iter.next()) |tensor_idx| {
+                self.data.unwrap()[tensor_idx] = val;
             }
         }
 
@@ -335,9 +334,9 @@ pub fn Tensor(comptime T: type) type {
             var old_tensor_iter = try self.getIndexIter();
             defer old_tensor_iter.deinit();
 
-            var idx: usize = 0;
-            while (!old_tensor_iter.finished) : (idx += 1) {
-                data_items[idx] = self.data.unwrap()[old_tensor_iter.next()];
+            var new_tensor_idx: usize = 0;
+            while (old_tensor_iter.next()) |old_tensor_idx| : (new_tensor_idx += 1) {
+                data_items[new_tensor_idx] = self.data.unwrap()[old_tensor_idx];
             }
 
             // Get the stride of the new tensor
@@ -564,7 +563,10 @@ pub fn TensorIndexIter(comptime T: type) type {
 
         /// Return the next data index, if
         /// the iteration has completed returns null instead
-        fn next(self: *Self) usize {
+        fn next(self: *Self) ?usize {
+            if (self.finished) {
+                return null;
+            }
             // Get the current index (done before incrementing so that
             // the first index returned is the first of the Tensor)
             const next_index = self.current_data_index;
